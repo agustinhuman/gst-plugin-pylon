@@ -257,6 +257,7 @@ GstPylon *gst_pylon_new(GstElement *gstpylonsrc, const gchar *device_user_name,
       throw Pylon::GenericException(msg.c_str(), __FILE__, __LINE__);
     }
 
+    // At this point, n_devices >= 1 (checked at line 238)
     if (device_index >= n_devices) {
       std::string msg = "Device index " + std::to_string(device_index) +
                         " is out of range. Found " + std::to_string(n_devices) +
