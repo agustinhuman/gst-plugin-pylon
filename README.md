@@ -105,6 +105,8 @@ The mapping of the camera pixel format names to the gstreamer format names is:
 |Pylon              | GStreamer  |
 |-------------------|:----------:|
 | Mono8             |  GRAY8     |
+| Mono16            |  GRAY16_LE |
+| Coord3D_C16       |  GRAY16_LE |
 | RGB8Packed        |  RGB       |
 | RGB8              |  RGB       |
 | BGR8Packed        |  BGR       |
