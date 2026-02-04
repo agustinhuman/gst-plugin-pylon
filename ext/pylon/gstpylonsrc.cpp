@@ -192,7 +192,7 @@ static GType gst_pylon_nvsurface_layout_enum_get_type(void) {
     GST_STATIC_PAD_TEMPLATE(
         "src", GST_PAD_SRC, GST_PAD_ALWAYS,
         GST_STATIC_CAPS(GST_VIDEO_CAPS_MAKE(
-            " {GRAY8, RGB, BGR, YUY2, UYVY} ") ";"
+            " {GRAY8, GRAY16_LE, RGB, BGR, YUY2, UYVY} ") ";"
                                                "video/"
                                                "x-bayer,format={rggb,bggr,gbgr,"
                                                "grgb},"

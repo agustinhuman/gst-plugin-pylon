@@ -45,11 +45,18 @@ typedef struct {
 } PixelFormatMappingType;
 
 const std::vector<PixelFormatMappingType> pixel_format_mapping_raw = {
-    {"Mono8", "GRAY8"},        {"RGB8Packed", "RGB"},
-    {"BGR8Packed", "BGR"},     {"RGB8", "RGB"},
-    {"BGR8", "BGR"},           {"YCbCr422_8", "YUY2"},
-    {"YUV422_8_UYVY", "UYVY"}, {"YUV422_8", "YUY2"},
-    {"YUV422Packed", "UYVY"},  {"YUV422_YUYV_Packed", "YUY2"}};
+    {"Mono8", "GRAY8"},
+    {"Mono16", "GRAY16_LE"},
+    {"Coord3D_C16", "GRAY16_LE"},
+    {"RGB8Packed", "RGB"},
+    {"BGR8Packed", "BGR"},
+    {"RGB8", "RGB"},
+    {"BGR8", "BGR"},
+    {"YCbCr422_8", "YUY2"},
+    {"YUV422_8_UYVY", "UYVY"},
+    {"YUV422_8", "YUY2"},
+    {"YUV422Packed", "UYVY"},
+    {"YUV422_YUYV_Packed", "YUY2"}};
 
 const std::vector<PixelFormatMappingType> pixel_format_mapping_bayer = {
     {"BayerBG8", "bggr"},
