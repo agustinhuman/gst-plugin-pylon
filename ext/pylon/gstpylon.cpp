@@ -259,8 +259,10 @@ GstPylon *gst_pylon_new(GstElement *gstpylonsrc, const gchar *device_user_name,
 
     if (device_index >= n_devices) {
       std::string msg = "Device index " + std::to_string(device_index) +
-                        " exceeds the " + std::to_string(n_devices) +
-                        " devices found to match the given criteria";
+                        " is out of range. Found " + std::to_string(n_devices) +
+                        (n_devices == 1 ? " device" : " devices") + ", valid " +
+                        (n_devices == 1 ? "index is" : "indices are") + " 0-" +
+                        std::to_string(n_devices - 1);
       throw Pylon::GenericException(msg.c_str(), __FILE__, __LINE__);
     }
 
