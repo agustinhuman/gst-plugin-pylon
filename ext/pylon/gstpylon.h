@@ -44,6 +44,12 @@ typedef enum {
   ENUM_ABORT = 2,
 } GstPylonCaptureErrorEnum;
 
+typedef enum {
+  ENUM_DEPTH_VISUALIZE_METRIC = 0,
+  ENUM_DEPTH_VISUALIZE_FRAME = 1,
+  ENUM_DEPTH_VISUALIZE_CAM = 2,
+} GstPylonDepthVisualizeEnum;
+
 #ifdef NVMM_ENABLED
 typedef enum {
   ENUM_BLOCK_LINEAR = 0,
@@ -72,6 +78,11 @@ gboolean gst_pylon_get_startup_geometry(GstPylon *self, gint *start_width,
                                         gint *start_height);
 gboolean gst_pylon_set_configuration(GstPylon *self, const GstCaps *conf,
                                      GError **err);
+
+gboolean gst_pylon_set_depth_visualize(GstPylon *self,
+                                       GstPylonDepthVisualizeEnum mode,
+                                       GError **err);
+GstPylonDepthVisualizeEnum gst_pylon_get_depth_visualize(GstPylon *self);
 gboolean gst_pylon_set_pfs_config(GstPylon *self, const gchar *pfs_location,
                                   GError **err);
 gchar *gst_pylon_camera_get_string_properties();

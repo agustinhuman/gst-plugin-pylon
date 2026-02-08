@@ -121,6 +121,67 @@ The mapping of the camera pixel format names to the gstreamer format names is:
 | BayerRG8          |  rggb      |
 | BayerGB8          |  gbrg      |
 
+#### Blaze 3D depth maps
+
+Basler blaze cameras can stream a depth map via the **Range** component. The available **PixelFormat-Range** values depend on the camera and the pylon GenTL producer, witch currently exposes **Mono16** or **Confidence16** (and may not  **Coord3D_C16**).
+
+
+
+Because multiple 16-bit formats map to `GRAY16_LE`, select the component and pixel format via the camera properties and verify supported values with `gst-inspect-1.0 pylonsrc`.
+
+Depth map example (16-bit grayscale):
+
+```
+gst-launch-1.0  pylonsrc
+        device-serial-number="40676065"
+        cam::PixelFormat-Range=Mono16
+        cam::ComponentEnable-Range=true
+        cam::ComponentEnable-Intensity=false
+        cam::ComponentEnable-Confidence=false
+        !
+        "video/x-raw,format=GRAY16_LE,framerate=10/1"
+        !
+        videoconvert
+        !
+        autovideosink
+```
+
+Optional visualization (scale depth to 0-65535 per frame or per camera range).
+Note: visualization is only available in system memory mode (not NVMM).
+Modes: `metric` (default, raw depth values), `frame` (scale per-frame), `cam` (scale using DepthMin/DepthMax).
+
+```
+gst-launch-1.0 pylonsrc \
+        cam::ComponentEnable-Intensity=false \
+        cam::ComponentEnable-Confidence=false \
+        cam::ComponentEnable-Range=true \
+        cam::PixelFormat-Range=Mono16 \
+        depth-visualize=frame \
+        ! "video/x-raw,format=GRAY16_LE" ! videoconvert ! autovideosink
+```
+
+Or scale using camera-reported range:
+
+```
+gst-launch-1.0 pylonsrc \
+        cam::ComponentEnable-Intensity=false \
+        cam::ComponentEnable-Confidence=false \
+        cam::ComponentEnable-Range=true \
+        cam::PixelFormat-Range=Mono16 \
+        depth-visualize=cam \
+        ! "video/x-raw,format=GRAY16_LE" ! videoconvert ! autovideosink
+```
+
+Intensity example (2D image):
+
+```
+gst-launch-1.0 pylonsrc \
+        cam::ComponentEnable-Range=false \
+        cam::ComponentEnable-Confidence=false \
+        cam::ComponentEnable-Intensity=true \
+        ! videoconvert ! autovideosink
+```
+
 ### Fixation
 
 If two pipeline elements don't specify which capabilities to choose, a fixation step gets applied.

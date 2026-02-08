@@ -60,7 +60,6 @@ std::vector<GParamSpec*> gst_pylon_camera_handle_node(
 static const std::unordered_set<std::string> propfilter_set = {
     "Width",
     "Height",
-    "PixelFormat",
     "AcquisitionFrameRateEnable",
     "AcquisitionFrameRate",
     "AcquisitionFrameRateAbs",
@@ -91,6 +90,44 @@ static const std::unordered_set<std::string> categoryfilter_set = {
 std::unordered_set<std::string> selectorfilter_set = {
     "DeviceLinkSelector",
 };
+
+static bool should_treat_as_direct_feature(GenApi::INode* node,
+                                           GenApi::INode* selector_node,
+                                           GenApi::INodeMap* nodemap) {
+  if (!node || !selector_node) {
+    return false;
+  }
+
+  Pylon::CParameter selector_param(selector_node);
+  if (selector_param.IsWritable()) {
+    return false;
+  }
+
+  static const std::unordered_set<std::string> blaze_direct_features = {
+      "ExposureTime",
+      "PixelFormat",
+  };
+
+  if (blaze_direct_features.find(std::string(node->GetName().c_str())) ==
+      blaze_direct_features.end()) {
+    return false;
+  }
+
+  if (!nodemap) {
+    return false;
+  }
+
+  try {
+    Pylon::CStringParameter family(nodemap->GetNode("DeviceFamilyName"));
+    if (family.IsValid()) {
+      auto family_name = std::string(family.GetValue().c_str());
+      return family_name.find("blaze") != std::string::npos;
+    }
+  } catch (const Pylon::GenericException&) {
+  }
+
+  return false;
+}
 
 /* filter for features that are not supported */
 bool is_unsupported_feature(const std::string& feature_name) {
@@ -213,6 +250,17 @@ std::vector<std::string> GstPylonFeatureWalker::process_selector_features(
 
   auto selector = selectors.at(0);
   *selector_node = selector->GetNode();
+
+  /* If selector is not writable, treat ExposureTime/PixelFormat on blaze as
+   * direct to avoid failing selector value installation
+   */
+  if (should_treat_as_direct_feature(node, *selector_node, node->GetNodeMap())) {
+    GST_DEBUG(
+        "Selector %s is not writable on blaze, treating %s as direct feature",
+        (*selector_node)->GetName().c_str(), node->GetName().c_str());
+    enum_values.push_back("direct-feature");
+    return enum_values;
+  }
 
   gint selector_type = (*selector_node)->GetPrincipalInterfaceType();
   switch (selector_type) {

@@ -68,6 +68,7 @@ struct _GstPylonSrc {
   gchar *user_set;
   gchar *pfs_location;
   gboolean enable_correction;
+  GstPylonDepthVisualizeEnum depth_visualize;
   GstPylonCaptureErrorEnum capture_error;
   GObject *cam;
   GObject *stream;
@@ -109,6 +110,7 @@ enum {
   PROP_USER_SET,
   PROP_PFS_LOCATION,
   PROP_ENABLE_CORRECTION,
+  PROP_DEPTH_VISUALIZE,
   PROP_CAPTURE_ERROR,
   PROP_CAM,
   PROP_STREAM,
@@ -126,6 +128,7 @@ enum {
 #define PROP_USER_SET_DEFAULT NULL
 #define PROP_PFS_LOCATION_DEFAULT NULL
 #define PROP_ENABLE_CORRECTION_DEFAULT TRUE
+#define PROP_DEPTH_VISUALIZE_DEFAULT ENUM_DEPTH_VISUALIZE_METRIC
 #define PROP_CAM_DEFAULT NULL
 #define PROP_STREAM_DEFAULT NULL
 #define PROP_CAPTURE_ERROR_DEFAULT ENUM_ABORT
@@ -137,8 +140,31 @@ enum {
 /* Enum for cature_error */
 #define GST_TYPE_CAPTURE_ERROR_ENUM (gst_pylon_capture_error_enum_get_type())
 
+/* Enum for depth visualization selection */
+#define GST_TYPE_DEPTH_VISUALIZE_ENUM (gst_pylon_depth_visualize_enum_get_type())
+
 /* Child proxy interface names */
 static const gchar *gst_pylon_src_child_proxy_names[] = {"cam", "stream"};
+
+static GType gst_pylon_depth_visualize_enum_get_type(void) {
+  static gsize gtype = 0;
+  static const GEnumValue values[] = {
+      {ENUM_DEPTH_VISUALIZE_METRIC, "metric",
+       "Raw depth values in mm (no visualization scaling)."},
+      {ENUM_DEPTH_VISUALIZE_FRAME, "frame",
+       "Scale depth per frame (min=black, max=white)."},
+      {ENUM_DEPTH_VISUALIZE_CAM, "cam",
+       "Scale depth using DepthMin/DepthMax (min=black, max=white)."},
+      {0, NULL, NULL}};
+
+  if (g_once_init_enter(&gtype)) {
+    GType tmp =
+        g_enum_register_static("GstPylonDepthVisualizeEnum", values);
+    g_once_init_leave(&gtype, tmp);
+  }
+
+  return (GType)gtype;
+}
 
 static GType gst_pylon_capture_error_enum_get_type(void) {
   static gsize gtype = 0;
@@ -304,6 +330,15 @@ static void gst_pylon_src_class_init(GstPylonSrcClass *klass) {
                                    GST_PARAM_MUTABLE_READY)));
 
   g_object_class_install_property(
+      gobject_class, PROP_DEPTH_VISUALIZE,
+      g_param_spec_enum(
+        "depth-visualize", "Depth visualize",
+        "Depth visualization mode: 'metric' (raw mm), 'frame' (scale per-frame), or 'cam' (scale using DepthMin/DepthMax).",
+        GST_TYPE_DEPTH_VISUALIZE_ENUM, PROP_DEPTH_VISUALIZE_DEFAULT,
+        static_cast<GParamFlags>(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                     GST_PARAM_MUTABLE_READY)));
+
+  g_object_class_install_property(
       gobject_class, PROP_CAPTURE_ERROR,
       g_param_spec_enum(
           "capture-error", "Capture error strategy",
@@ -400,6 +435,7 @@ static void gst_pylon_src_init(GstPylonSrc *self) {
   self->user_set = PROP_USER_SET_DEFAULT;
   self->pfs_location = PROP_PFS_LOCATION_DEFAULT;
   self->enable_correction = PROP_ENABLE_CORRECTION_DEFAULT;
+  self->depth_visualize = PROP_DEPTH_VISUALIZE_DEFAULT;
   self->capture_error = PROP_CAPTURE_ERROR_DEFAULT;
   self->cam = PROP_CAM_DEFAULT;
   self->stream = PROP_STREAM_DEFAULT;
@@ -443,6 +479,10 @@ static void gst_pylon_src_set_property(GObject *object, guint property_id,
       break;
     case PROP_ENABLE_CORRECTION:
       self->enable_correction = g_value_get_boolean(value);
+      break;
+    case PROP_DEPTH_VISUALIZE:
+      self->depth_visualize =
+          static_cast<GstPylonDepthVisualizeEnum>(g_value_get_enum(value));
       break;
     case PROP_CAPTURE_ERROR:
       self->capture_error =
@@ -491,6 +531,9 @@ static void gst_pylon_src_get_property(GObject *object, guint property_id,
       break;
     case PROP_ENABLE_CORRECTION:
       g_value_set_boolean(value, self->enable_correction);
+      break;
+    case PROP_DEPTH_VISUALIZE:
+      g_value_set_enum(value, self->depth_visualize);
       break;
     case PROP_CAPTURE_ERROR:
       g_value_set_enum(value, self->capture_error);
@@ -815,6 +858,15 @@ static gboolean gst_pylon_src_start(GstBaseSrc *src) {
   GST_OBJECT_UNLOCK(self);
 
   if (using_pfs && ret == FALSE && error) {
+    goto log_gst_error;
+  }
+
+  GST_OBJECT_LOCK(self);
+  ret = gst_pylon_set_depth_visualize(self->pylon, self->depth_visualize,
+                                      &error);
+  GST_OBJECT_UNLOCK(self);
+
+  if (ret == FALSE && error) {
     goto log_gst_error;
   }
 

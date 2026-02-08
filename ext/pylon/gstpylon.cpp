@@ -51,6 +51,7 @@
 #include "gstpylonimagehandler.h"
 #include "gstpylonsysmembufferfactory.h"
 
+#include <limits>
 #include <map>
 #include <vector>
 
@@ -92,8 +93,11 @@ static void gst_pylon_query_caps(
     GstPylon *self, GstStructure *st,
     const std::vector<PixelFormatMappingType> &pixel_format_mapping);
 static void gst_pylon_add_result_meta(
-    GstPylon *self, GstBuffer *buf,
-    Pylon::CBaslerUniversalGrabResultPtr &grab_result_ptr);
+  GstPylon *self, GstBuffer *buf,
+  Pylon::CBaslerUniversalGrabResultPtr &grab_result_ptr);
+static bool gst_pylon_get_grab_result_component(
+  Pylon::CBaslerUniversalGrabResultPtr &grab_result_ptr,
+  Pylon::CPylonDataComponent &component);
 static std::vector<std::string> gst_pylon_gst_to_pfnc(
     const std::string &gst_format,
     const std::vector<PixelFormatMappingType> &pixel_format_mapping);
@@ -121,6 +125,8 @@ static gchar *gst_pylon_get_string_properties(
 
 static constexpr gint DEFAULT_ALIGNMENT = 35;
 
+static bool gst_pylon_update_depth_range(GstPylon *self);
+
 struct _GstPylon {
   GstElement *gstpylonsrc;
   std::shared_ptr<Pylon::CBaslerUniversalInstantCamera> camera =
@@ -137,11 +143,36 @@ struct _GstPylon {
   std::string requested_device_serial_number;
   gint requested_device_index;
 
+  GstPylonDepthVisualizeEnum depth_visualize = ENUM_DEPTH_VISUALIZE_METRIC;
+  gint64 depth_min = 0;
+  gint64 depth_max = 0;
+
 #ifdef NVMM_ENABLED
   GstPylonNvsurfaceLayoutEnum nvsurface_layout;
   guint gpu_id;
 #endif
 };
+
+static bool gst_pylon_update_depth_range(GstPylon *self) {
+  g_return_val_if_fail(self, false);
+
+  try {
+    GenApi::INodeMap &nodemap = self->camera->GetNodeMap();
+
+    Pylon::CIntegerParameter depth_min(nodemap, "DepthMin");
+    Pylon::CIntegerParameter depth_max(nodemap, "DepthMax");
+
+    if (!depth_min.IsReadable() || !depth_max.IsReadable()) {
+      return false;
+    }
+
+    self->depth_min = depth_min.GetValue();
+    self->depth_max = depth_max.GetValue();
+    return self->depth_max > self->depth_min;
+  } catch (const Pylon::GenericException &) {
+    return false;
+  }
+}
 
 using GrabResultPair = std::pair<std::shared_ptr<GstPylonBufferFactory>,
                                  Pylon::CBaslerUniversalGrabResultPtr *>;
@@ -476,6 +507,40 @@ static void free_ptr_grab_result(gpointer data) {
   delete wrapped_data;
 }
 
+static bool gst_pylon_get_grab_result_component(
+  Pylon::CBaslerUniversalGrabResultPtr &grab_result_ptr,
+  Pylon::CPylonDataComponent &component) {
+
+  if (!grab_result_ptr) {
+    return false;
+  }
+
+  size_t component_count = 0;
+  try {
+    component_count = grab_result_ptr->GetDataComponentCount();
+  } catch (const Pylon::GenericException &) {
+    return false;
+  }
+
+  if (component_count == 0) {
+    return false;
+  }
+
+  try {
+    auto components =
+        grab_result_ptr->GetDataComponent(Pylon::ComponentType_Intensity);
+    if (!components.empty()) {
+      component = components.front();
+      return component.IsValid();
+    }
+
+    component = grab_result_ptr->GetDataComponent(0);
+    return component.IsValid();
+  } catch (const Pylon::GenericException &) {
+    return false;
+  }
+}
+
 gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
                            GstPylonCaptureErrorEnum capture_error,
                            GError **err) {
@@ -544,26 +609,91 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
     }
   };
 
+  const void *buffer_ptr = nullptr;
+  gsize buffer_size = 0;
+  size_t src_stride = 0;
+  size_t src_width_pix = 0;
+  size_t src_height_pix = 0;
+  Pylon::EPixelType pixel_type = Pylon::PixelType_Undefined;
+
+  Pylon::CPylonDataComponent component;
+  const bool has_component =
+      gst_pylon_get_grab_result_component(*grab_result_ptr, component);
+
+  if (has_component && component.IsValid()) {
+    buffer_ptr = component.GetData();
+    buffer_size = component.GetDataSize();
+    src_width_pix = component.GetWidth();
+    src_height_pix = component.GetHeight();
+    pixel_type = component.GetPixelType();
+    if (!component.GetStride(src_stride)) {
+      src_stride = 0;
+    }
+  } else {
+    buffer_ptr = (*grab_result_ptr)->GetBuffer();
+    src_width_pix = (*grab_result_ptr)->GetWidth();
+    src_height_pix = (*grab_result_ptr)->GetHeight();
+    pixel_type = (*grab_result_ptr)->GetPixelType();
+    if (!(*grab_result_ptr)->GetStride(src_stride)) {
+      src_stride = 0;
+    }
+    try {
+      buffer_size = (*grab_result_ptr)->GetImageSize();
+    } catch (const Pylon::GenericException &) {
+      buffer_size = (*grab_result_ptr)->GetPayloadSize();
+    }
+  }
+
+  if (src_stride == 0 && src_width_pix > 0 &&
+      pixel_type != Pylon::PixelType_Undefined) {
+    const auto bits_per_pixel = Pylon::BitPerPixel(pixel_type);
+    if (bits_per_pixel > 0 && ((src_width_pix * bits_per_pixel) % 8 == 0)) {
+      src_stride = (src_width_pix * bits_per_pixel) >> 3;
+    }
+  }
+
+  if (buffer_size == 0 && src_stride > 0 && src_height_pix > 0) {
+    buffer_size = static_cast<gsize>(src_stride * src_height_pix);
+  }
+
+  bool is_range_component = false;
+  if (has_component && component.IsValid()) {
+    try {
+      is_range_component =
+          (component.GetComponentType() == Pylon::ComponentType_Range);
+    } catch (const Pylon::GenericException &) {
+      is_range_component = false;
+    }
+  }
+
+  const bool is_depth_map =
+      is_range_component || (pixel_type == Pylon::PixelType_Coord3D_C16);
+  const bool depth_visualize =
+      (self->depth_visualize != ENUM_DEPTH_VISUALIZE_METRIC) &&
+      is_depth_map && (self->mem_type == MEM_SYSMEM);
+
+#ifndef NVMM_ENABLED
+  (void)src_width_pix;
+  (void)src_height_pix;
+  (void)pixel_type;
+#endif
+
 #ifdef NVMM_ENABLED
   if (MEM_NVMM == self->mem_type) {
     NvBufSurface *surf = reinterpret_cast<NvBufSurface *>(
         (*grab_result_ptr)->GetBufferContext());
 
-    size_t src_stride;
-    (*grab_result_ptr)->GetStride(src_stride);
-
-    /* calc src width in byte from pixel type info */
-    const auto src_width_pix = (*grab_result_ptr)->GetWidth();
-    const auto src_bit_per_pix =
-        Pylon::BitPerPixel((*grab_result_ptr)->GetPixelType());
+    const auto src_bit_per_pix = Pylon::BitPerPixel(pixel_type);
 
     g_assert(0 == (src_width_pix * src_bit_per_pix) % 8);
     const size_t src_width = (src_width_pix * src_bit_per_pix) >> 3;
+    if (src_stride == 0) {
+      src_stride = src_width;
+    }
 
     cudaError_t cuda_err = cudaMemcpy2D(
         surf->surfaceList[0].mappedAddr.addr[0], surf->surfaceList[0].pitch,
-        (*grab_result_ptr)->GetBuffer(), src_stride, src_width,
-        (*grab_result_ptr)->GetHeight(), cudaMemcpyDefault);
+        buffer_ptr, src_stride, src_width, src_height_pix, cudaMemcpyDefault);
     if (cuda_err != cudaSuccess) {
       g_set_error(err, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_FAILED,
                   "Error copying memory to device");
@@ -576,10 +706,96 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
         buffer_ref, static_cast<GDestroyNotify>(free_ptr_grab_result));
   } else {
 #endif
-    gsize buffer_size = (*grab_result_ptr)->GetImageSize();
+    if (depth_visualize && Pylon::BitPerPixel(pixel_type) == 16 &&
+        src_width_pix > 0 && src_height_pix > 0 && src_stride > 0) {
+      guint16 depth_min = 0;
+      guint16 depth_max = 0;
+      bool have_range = false;
+
+      if (self->depth_visualize == ENUM_DEPTH_VISUALIZE_CAM) {
+        if (gst_pylon_update_depth_range(self)) {
+          depth_min = static_cast<guint16>(self->depth_min);
+          depth_max = static_cast<guint16>(self->depth_max);
+          have_range = depth_max > depth_min;
+        }
+      } else if (self->depth_visualize == ENUM_DEPTH_VISUALIZE_FRAME) {
+        const auto *src = static_cast<const guint8 *>(buffer_ptr);
+        depth_min = std::numeric_limits<guint16>::max();
+        depth_max = 0;
+        bool found_valid = false;
+
+        for (size_t y = 0; y < src_height_pix; ++y) {
+          const auto *src_row =
+              reinterpret_cast<const guint16 *>(src + y * src_stride);
+          for (size_t x = 0; x < src_width_pix; ++x) {
+            const guint16 v = src_row[x];
+            if (v == 0) {
+              continue;
+            }
+            found_valid = true;
+            if (v < depth_min) depth_min = v;
+            if (v > depth_max) depth_max = v;
+          }
+        }
+
+        have_range = found_valid && (depth_max > depth_min);
+      }
+
+      if (have_range) {
+        const gsize out_size = static_cast<gsize>(src_stride * src_height_pix);
+        GstBuffer *out = gst_buffer_new_allocate(NULL, out_size, NULL);
+        GstMapInfo map;
+
+        if (gst_buffer_map(out, &map, GST_MAP_WRITE)) {
+          const auto *src = static_cast<const guint8 *>(buffer_ptr);
+          auto *dst = static_cast<guint8 *>(map.data);
+
+          for (size_t y = 0; y < src_height_pix; ++y) {
+            const auto *src_row =
+                reinterpret_cast<const guint16 *>(src + y * src_stride);
+            auto *dst_row =
+                reinterpret_cast<guint16 *>(dst + y * src_stride);
+
+            for (size_t x = 0; x < src_width_pix; ++x) {
+              const guint16 v = src_row[x];
+              guint16 out_v = 0;
+
+              if (v <= depth_min) {
+                out_v = 0;
+              } else if (v >= depth_max) {
+                out_v = 0xFFFF;
+              } else {
+                const guint32 num = static_cast<guint32>(v - depth_min) * 0xFFFF;
+                const guint32 den = static_cast<guint32>(depth_max - depth_min);
+                out_v = static_cast<guint16>(num / den);
+              }
+
+              dst_row[x] = out_v;
+            }
+          }
+
+          gst_buffer_unmap(out, &map);
+
+          *buf = out;
+          gst_pylon_add_result_meta(self, *buf, *grab_result_ptr);
+
+          GstPylonMeta *pylon_meta = gst_buffer_get_pylon_meta(*buf);
+          if (pylon_meta) {
+            pylon_meta->stride = src_stride;
+          }
+
+          delete grab_result_ptr;
+          grab_result_ptr = NULL;
+          return TRUE;
+        }
+
+        gst_buffer_unref(out);
+      }
+    }
+
     auto buffer_ref = new GrabResultPair(self->buffer_factory, grab_result_ptr);
     *buf = gst_buffer_new_wrapped_full(
-        static_cast<GstMemoryFlags>(0), (*grab_result_ptr)->GetBuffer(),
+        static_cast<GstMemoryFlags>(0), const_cast<void *>(buffer_ptr),
         buffer_size, 0, buffer_size, buffer_ref,
         static_cast<GDestroyNotify>(free_ptr_grab_result));
 #ifdef NVMM_ENABLED
@@ -587,6 +803,11 @@ gboolean gst_pylon_capture(GstPylon *self, GstBuffer **buf,
 #endif
 
   gst_pylon_add_result_meta(self, *buf, *grab_result_ptr);
+
+  GstPylonMeta *pylon_meta = gst_buffer_get_pylon_meta(*buf);
+  if (pylon_meta && src_stride > 0) {
+    pylon_meta->stride = src_stride;
+  }
 
   return TRUE;
 }
@@ -849,6 +1070,7 @@ gboolean gst_pylon_set_configuration(GstPylon *self, const GstCaps *conf,
     }
 
     bool fmt_valid = false;
+
     for (const auto &gst_structure_format : gst_structure_formats) {
       const std::vector<std::string> pfnc_formats =
           gst_pylon_gst_to_pfnc(gst_format, gst_structure_format.format_map);
@@ -1123,6 +1345,32 @@ gboolean gst_pylon_is_same_device(GstPylon *self, const gint device_index,
   return self->requested_device_index == device_index &&
          self->requested_device_user_name == user_name &&
          self->requested_device_serial_number == serial_number;
+}
+
+gboolean gst_pylon_set_depth_visualize(GstPylon *self,
+                                       GstPylonDepthVisualizeEnum mode,
+                                       GError **err) {
+  g_return_val_if_fail(self, FALSE);
+  g_return_val_if_fail(err && *err == NULL, FALSE);
+
+  self->depth_visualize = mode;
+
+  if (self->depth_visualize == ENUM_DEPTH_VISUALIZE_CAM) {
+    if (!gst_pylon_update_depth_range(self)) {
+      GST_WARNING_OBJECT(self->gstpylonsrc,
+                         "Depth visualization enabled but DepthMin/DepthMax "
+                         "are not readable or invalid; falling back to raw "
+                         "depth output.");
+    }
+  }
+
+  return TRUE;
+}
+
+GstPylonDepthVisualizeEnum gst_pylon_get_depth_visualize(GstPylon *self) {
+  g_return_val_if_fail(self, ENUM_DEPTH_VISUALIZE_METRIC);
+
+  return self->depth_visualize;
 }
 
 #ifdef NVMM_ENABLED
